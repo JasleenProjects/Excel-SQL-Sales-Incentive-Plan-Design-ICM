@@ -1,0 +1,941 @@
+/*
+================================================================================
+SALES INCENTIVE COMPENSATION MANAGEMENT (ICM) — SQL PROJECT QUERIES
+Fictional organisation: ABC Financial Services
+Database: SQLite | Tool used: DB Browser for SQLite
+
+PURPOSE
+-------
+This script documents the SQL work completed for the independent ICM learning
+project, from table creation and CSV import instructions through data cleaning,
+table population, incentive calculations, validation and final reporting.
+
+IMPORTANT PROJECT BOUNDARIES
+----------------------------
+1. All employee, product, target and transaction data are fictional.
+2. Incentive-plan figures are illustrative assumptions, not industry benchmarks.
+3. This is an independent learning simulation, NOT a Varicent implementation,
+   production ICM system or live payroll process.
+4. The Excel workbook and SQLite database independently implement the same
+   core business rules so that their outputs can be reconciled.
+5. The two incentive components have SEPARATE caps:
+      Achievement incentive cap   = ₹30,000
+      Profitability incentive cap = ₹5,000
+      Maximum combined payout     = ₹35,000 per employee per month.
+6. The profitability incentive is independent of the 80% achievement threshold.
+7. Employee joining and exit dates are treated as inclusive dates in this
+   simulation. Employee master dates were imported as DD-MM-YYYY text;
+   transaction and incentive month dates are stored as YYYY-MM-DD text.
+
+NOTE:
+-CSV IMPORTS WERE PERFORMED THROUGH DB BROWSER'S "IMPORT -> TABLE FROM CSV FILE"
+FUNCTIONALITY. SQL itself does not browse to or import a local file path here.
+For each import:
+  a. Open the correct database.
+  b. Choose File -> Import -> Table from CSV file.
+  c. Select the CSV exported from the corresponding Excel sheet.
+  d. Use the staging-table name and source headers documented below.
+  e. Confirm the first row contains column names.
+  f. Import the data, then run the corresponding INSERT ... SELECT below.
+
+SOURCE SHEETS / CSV IMPORTS
+------------------------------------
+Excel workbook sheets exported as CSV:
+  Employee_Master       -> Employee_Master_Staging  (100 rows)
+  Product_Master        -> Product_Master_Staging   (8 rows)
+  Sales_Transactions    -> Sales_Transactions_Staging (1,500 rows)
+  Target_Master         -> Target_Master_Staging    (300 rows)
+
+The staging tables are temporary import landing areas in the project database.
+The INSERT ... SELECT statements below convert and transfer the imported
+records into the final structured tables.
+
+Expected source column headers:
+  Employee_Master:
+    Employee_ID, Employee Name, Region, Role, Joining Date,
+    Employment End Date, Employment Status, Manager ID
+
+  Product_Master:
+    Product_ID, Product_Name, Standard_Selling_Price,
+    "Contribution_Margin_%", Profitability_Eligibility
+
+  Sales_Transactions:
+    Transaction ID, Employee ID, Product, Sales Value (INR),
+    Transaction Date, Transaction Status
+
+  Target_Master:
+    Target ID, Employee ID, Incentive Month, Sales Target,
+    Eligible Service Days, Calender Days, Adjusted Sales Target
+
+NOTE:
+- The Target_Master source header was "Calender Days" (spelling as in the
+  imported source file); it is mapped below to Calendar_Days.
+================================================================================
+*/
+
+
+/*==============================================================================
+SECTION 1 — CREATION OF FINAL DATABASE TABLES
+==============================================================================*/
+
+-- 1A. Employee master:
+-- One row per employee. Employee_ID is the primary key.
+CREATE TABLE IF NOT EXISTS Employee_Master (
+    Employee_ID TEXT PRIMARY KEY,
+    Employee_Name TEXT,
+    Region TEXT,
+    Role TEXT,
+    Joining_Date TEXT,
+    Employment_End_Date TEXT,
+    Employment_Status TEXT,
+    Manager_ID TEXT
+);
+
+-- 1B. Product master:
+-- One row per product. Contribution_Margin is stored as a decimal:
+-- 15% is stored as 0.15.
+CREATE TABLE IF NOT EXISTS Product_Master (
+    Product_ID TEXT PRIMARY KEY,
+    Product_Name TEXT NOT NULL,
+    Standard_Selling_Price REAL NOT NULL,
+    Contribution_Margin REAL NOT NULL,
+    Profitability_Eligibility TEXT
+);
+
+-- 1C. Sales transactions:
+-- One row per transaction. Employee_ID and Product_ID reference master tables.
+CREATE TABLE IF NOT EXISTS Sales_Transactions (
+    Transaction_ID TEXT PRIMARY KEY,
+    Employee_ID TEXT NOT NULL,
+    Product_ID TEXT NOT NULL,
+    Sales_Value REAL NOT NULL,
+    Transaction_Date TEXT NOT NULL,
+    Transaction_Status TEXT NOT NULL,
+    FOREIGN KEY (Employee_ID) REFERENCES Employee_Master(Employee_ID),
+    FOREIGN KEY (Product_ID) REFERENCES Product_Master(Product_ID)
+);
+
+-- 1D. Monthly target master:
+-- One row per employee per incentive month.
+CREATE TABLE IF NOT EXISTS Target_Master (
+    Target_ID TEXT PRIMARY KEY,
+    Employee_ID TEXT NOT NULL,
+    Incentive_Month TEXT NOT NULL,
+    Sales_Target REAL NOT NULL,
+    Eligible_Service_Days INTEGER,
+    Calendar_Days INTEGER,
+    Adjusted_Sales_Target REAL,
+    FOREIGN KEY (Employee_ID) REFERENCES Employee_Master(Employee_ID),
+    UNIQUE (Employee_ID, Incentive_Month)
+);
+
+
+/*==============================================================================
+SECTION 2 — IMPORTING OF CSV FILES INTO STAGING TABLES (DB BROWSER GUI)
+
+DB Browser:
+  File -> Import -> Table from CSV file
+
+Imported each exported CSV using these exact staging-table names:
+  Employee_Master_Staging
+  Product_Master_Staging
+  Sales_Transactions_Staging
+  Target_Master_Staging
+
+After importing, confirm row counts:
+  Employee_Master_Staging       expected 100
+  Product_Master_Staging        expected 8
+  Sales_Transactions_Staging    expected 1500
+  Target_Master_Staging         expected 300
+
+==============================================================================*/
+
+
+/*==============================================================================
+SECTION 3 — TRANSFER AND CLEANING OF EMPLOYEE MASTER DATA
+Source: Employee_Master_Staging, imported from the Excel Employee_Master sheet.
+The source dates are DD-MM-YYYY text. They are retained in that format in the
+final Employee_Master table and standardised to YYYY-MM-DD inside date queries.
+Blank Employment End Date values are converted to NULL.
+==============================================================================*/
+
+INSERT INTO Employee_Master (
+    Employee_ID,
+    Employee_Name,
+    Region,
+    Role,
+    Joining_Date,
+    Employment_End_Date,
+    Employment_Status,
+    Manager_ID
+)
+SELECT
+    TRIM(Employee_ID),
+    TRIM("Employee Name"),
+    TRIM(Region),
+    TRIM(Role),
+    TRIM("Joining Date"),
+    CASE
+        WHEN "Employment End Date" IS NULL
+             OR TRIM("Employment End Date") = ''
+        THEN NULL
+        ELSE TRIM("Employment End Date")
+    END,
+    TRIM("Employment Status"),
+    NULLIF(TRIM("Manager ID"), '')
+FROM Employee_Master_Staging;
+
+
+/*==============================================================================
+SECTION 4 — TRANSFER AND CLEANING OF PRODUCT MASTER DATA
+Source: Product_Master_Staging, imported from the Excel Product_Master sheet.
+The source price may contain ₹, commas and spaces. These are removed before
+CAST converts the value to a numeric amount.
+The margin source may contain a % sign. It is converted to a decimal:
+  15% -> 0.15
+==============================================================================*/
+
+INSERT INTO Product_Master (
+    Product_ID,
+    Product_Name,
+    Standard_Selling_Price,
+    Contribution_Margin,
+    Profitability_Eligibility
+)
+SELECT
+    TRIM(Product_ID),
+    TRIM(Product_Name),
+    CAST(
+        REPLACE(
+            REPLACE(
+                REPLACE(Standard_Selling_Price, '₹', ''),
+            ',', ''),
+        ' ', '') AS REAL
+    ),
+    CAST(
+        REPLACE(
+            REPLACE("Contribution_Margin_%", '%', ''),
+        ' ', '') AS REAL
+    ) / 100.0,
+    CASE
+        WHEN CAST(
+            REPLACE(
+                REPLACE("Contribution_Margin_%", '%', ''),
+            ' ', '') AS REAL
+        ) / 100.0 >= 0.15
+        THEN 'Yes'
+        ELSE 'No'
+    END
+FROM Product_Master_Staging;
+
+
+/*==============================================================================
+SECTION 5 — TRANSFER AND CLEANING OF SALES TRANSACTIONS
+Source: Sales_Transactions_Staging, imported from the Excel
+Sales_Transactions sheet. 
+The source contains Product_Name, while the final table stores Product_ID.
+JOIN to Product_Master converts the product name to its product key.
+Sales values are cleaned of ₹, commas and spaces.
+DD-MM-YYYY transaction dates are converted to YYYY-MM-DD.
+==============================================================================*/
+
+INSERT INTO Sales_Transactions (
+    Transaction_ID,
+    Employee_ID,
+    Product_ID,
+    Sales_Value,
+    Transaction_Date,
+    Transaction_Status
+)
+SELECT
+    TRIM(S."Transaction ID"),
+    TRIM(S."Employee ID"),
+    P.Product_ID,
+    CAST(
+        REPLACE(
+            REPLACE(
+                REPLACE(S."Sales Value (INR)", '₹', ''),
+            ',', ''),
+        ' ', '') AS REAL
+    ),
+    SUBSTR(TRIM(S."Transaction Date"), 7, 4) || '-' ||
+    SUBSTR(TRIM(S."Transaction Date"), 4, 2) || '-' ||
+    SUBSTR(TRIM(S."Transaction Date"), 1, 2),
+    TRIM(S."Transaction Status")
+FROM Sales_Transactions_Staging AS S
+JOIN Product_Master AS P
+    ON TRIM(S.Product) = P.Product_Name;
+
+
+/*==============================================================================
+SECTION 6 — TRANSFER AND CLEANING OF MONTHLY TARGET DATA
+Source: Target_Master_Staging, imported from the Excel Target_Master sheet.
+Incentive Month is imported in a format such as Sep-26 and converted to
+YYYY-MM-01, for example 2026-09-01.
+Currency values are cleaned before conversion to REAL.
+"Calender Days" is the original source header and is mapped to Calendar_Days.
+==============================================================================*/
+
+INSERT INTO Target_Master (
+    Target_ID,
+    Employee_ID,
+    Incentive_Month,
+    Sales_Target,
+    Eligible_Service_Days,
+    Calendar_Days,
+    Adjusted_Sales_Target
+)
+SELECT
+    TRIM("Target ID"),
+    TRIM("Employee ID"),
+    '20' || SUBSTR(TRIM("Incentive Month"), 5, 2) || '-' ||
+    CASE SUBSTR(TRIM("Incentive Month"), 1, 3)
+        WHEN 'Jan' THEN '01'
+        WHEN 'Feb' THEN '02'
+        WHEN 'Mar' THEN '03'
+        WHEN 'Apr' THEN '04'
+        WHEN 'May' THEN '05'
+        WHEN 'Jun' THEN '06'
+        WHEN 'Jul' THEN '07'
+        WHEN 'Aug' THEN '08'
+        WHEN 'Sep' THEN '09'
+        WHEN 'Oct' THEN '10'
+        WHEN 'Nov' THEN '11'
+        WHEN 'Dec' THEN '12'
+    END || '-01',
+    CAST(
+        REPLACE(
+            REPLACE(
+                REPLACE("Sales Target", '₹', ''),
+            ',', ''),
+        ' ', '') AS REAL
+    ),
+    CAST("Eligible Service Days" AS INTEGER),
+    CAST("Calender Days" AS INTEGER),
+    CAST(
+        REPLACE(
+            REPLACE(
+                REPLACE("Adjusted Sales Target", '₹', ''),
+            ',', ''),
+        ' ', '') AS REAL
+    )
+FROM Target_Master_Staging;
+
+
+/*==============================================================================
+SECTION 7 — DATA IMPORT VALIDATION
+  Employee_Master       100
+  Product_Master          8
+  Sales_Transactions   1,500
+  Target_Master          300
+==============================================================================*/
+
+-- 7A. Row counts in all final tables.
+SELECT 'Employee_Master' AS Table_Name, COUNT(*) AS Record_Count
+FROM Employee_Master
+UNION ALL
+SELECT 'Product_Master', COUNT(*) FROM Product_Master
+UNION ALL
+SELECT 'Sales_Transactions', COUNT(*) FROM Sales_Transactions
+UNION ALL
+SELECT 'Target_Master', COUNT(*) FROM Target_Master;
+
+-- 7B. Check duplicate employee IDs (expected: zero rows).
+SELECT Employee_ID, COUNT(*) AS Duplicate_Count
+FROM Employee_Master
+GROUP BY Employee_ID
+HAVING COUNT(*) > 1;
+
+-- 7C. Check duplicate transaction IDs.
+SELECT Transaction_ID, COUNT(*) AS Duplicate_Count
+FROM Sales_Transactions
+GROUP BY Transaction_ID
+HAVING COUNT(*) > 1;
+
+-- 7D. Check duplicate employee-month targets.
+SELECT Employee_ID, Incentive_Month, COUNT(*) AS Record_Count
+FROM Target_Master
+GROUP BY Employee_ID, Incentive_Month
+HAVING COUNT(*) > 1;
+
+-- 7E. Check missing employee IDs in employee master.
+SELECT *
+FROM Employee_Master
+WHERE Employee_ID IS NULL OR TRIM(Employee_ID) = '';
+
+-- 7F. Check sales transactions with no matching employee.
+SELECT S.*
+FROM Sales_Transactions AS S
+LEFT JOIN Employee_Master AS E
+    ON S.Employee_ID = E.Employee_ID
+WHERE E.Employee_ID IS NULL;
+
+-- 7G. Check sales transactions with no matching product.
+SELECT S.*
+FROM Sales_Transactions AS S
+LEFT JOIN Product_Master AS P
+    ON S.Product_ID = P.Product_ID
+WHERE P.Product_ID IS NULL;
+
+-- 7H. Check foreign-key integrity.
+PRAGMA foreign_key_check;
+
+-- 7I. Confirm product prices and margins are numeric and correctly converted.
+SELECT
+    Product_ID,
+    Product_Name,
+    Standard_Selling_Price,
+    Contribution_Margin,
+    Profitability_Eligibility
+FROM Product_Master
+ORDER BY Product_ID;
+
+
+/*==============================================================================
+SECTION 8 — QUERIES USED TO INSPECT THE IMPORTED DATA
+==============================================================================*/
+
+-- 8A. View a sample of employee records.
+SELECT *
+FROM Employee_Master
+LIMIT 10;
+
+-- 8B. View a sample of sales transactions.
+SELECT *
+FROM Sales_Transactions
+LIMIT 10;
+
+-- 8C. View a sample of monthly targets.
+SELECT *
+FROM Target_Master
+LIMIT 10;
+
+-- 8D. Count employee records by region.
+SELECT
+    Region,
+    COUNT(*) AS Employee_Count
+FROM Employee_Master
+GROUP BY Region
+ORDER BY Region;
+
+-- 8E. Count employees by employment status.
+SELECT
+    Employment_Status,
+    COUNT(*) AS Employee_Count
+FROM Employee_Master
+GROUP BY Employment_Status;
+
+-- 8F. Count transactions by transaction status.
+SELECT
+    Transaction_Status,
+    COUNT(*) AS Transaction_Count
+FROM Sales_Transactions
+GROUP BY Transaction_Status
+ORDER BY Transaction_Status;
+
+-- 8G. Check the transaction value total by product.
+SELECT
+    P.Product_Name,
+    COUNT(S.Transaction_ID) AS Transaction_Count,
+    SUM(S.Sales_Value) AS Total_Sales_Value
+FROM Product_Master AS P
+LEFT JOIN Sales_Transactions AS S
+    ON P.Product_ID = S.Product_ID
+GROUP BY P.Product_ID, P.Product_Name
+ORDER BY P.Product_ID;
+
+
+/*==============================================================================
+SECTION 9 — EMPLOYEE DATE STANDARDISATION
+Employee dates were imported as DD-MM-YYYY text.
+This query previews their standardised ISO date values without changing the
+stored source values.
+==============================================================================*/
+
+SELECT
+    Employee_ID,
+    Joining_Date,
+    SUBSTR(Joining_Date, 7, 4) || '-' ||
+    SUBSTR(Joining_Date, 4, 2) || '-' ||
+    SUBSTR(Joining_Date, 1, 2) AS Standard_Joining_Date,
+    Employment_End_Date,
+    CASE
+        WHEN Employment_End_Date IS NULL
+             OR TRIM(Employment_End_Date) = ''
+        THEN NULL
+        ELSE
+            SUBSTR(Employment_End_Date, 7, 4) || '-' ||
+            SUBSTR(Employment_End_Date, 4, 2) || '-' ||
+            SUBSTR(Employment_End_Date, 1, 2)
+    END AS Standard_Exit_Date
+FROM Employee_Master
+LIMIT 10;
+
+
+/*==============================================================================
+SECTION 10 — INDIVIDUAL EMPLOYEE-MONTH SALES CHECKS
+These queries were used to inspect one employee's sales for one month.
+==============================================================================*/
+
+-- 10A. Gross sales for E001 in September 2026, regardless of transaction status.
+SELECT
+    Employee_ID,
+    SUM(Sales_Value) AS Gross_Sales
+FROM Sales_Transactions
+WHERE Employee_ID = 'E001'
+  AND Transaction_Date >= '2026-09-01'
+  AND Transaction_Date <  '2026-10-01'
+GROUP BY Employee_ID;
+
+-- 10B. Gross, completed, cancelled and reversed sales for E002 in September.
+SELECT
+    Employee_ID,
+    SUM(Sales_Value) AS Gross_Sales,
+    SUM(CASE WHEN Transaction_Status = 'Completed'
+             THEN Sales_Value ELSE 0 END) AS Completed_Sales,
+    SUM(CASE WHEN Transaction_Status = 'Cancelled'
+             THEN Sales_Value ELSE 0 END) AS Cancelled_Sales,
+    SUM(CASE WHEN Transaction_Status = 'Reversed'
+             THEN Sales_Value ELSE 0 END) AS Reversed_Sales
+FROM Sales_Transactions
+WHERE Employee_ID = 'E002'
+  AND Transaction_Date >= '2026-09-01'
+  AND Transaction_Date <  '2026-10-01'
+GROUP BY Employee_ID;
+
+-- 10C. Completed sales for E002 in September that also fall within employment.
+-- Employee dates are converted from DD-MM-YYYY to YYYY-MM-DD for comparison.
+SELECT
+    S.Employee_ID,
+    SUM(S.Sales_Value) AS Eligible_Net_Sales
+FROM Sales_Transactions AS S
+JOIN Employee_Master AS E
+    ON S.Employee_ID = E.Employee_ID
+WHERE S.Employee_ID = 'E002'
+  AND S.Transaction_Date >= '2026-09-01'
+  AND S.Transaction_Date <  '2026-10-01'
+  AND S.Transaction_Status = 'Completed'
+  AND S.Transaction_Date >= (
+      SUBSTR(E.Joining_Date, 7, 4) || '-' ||
+      SUBSTR(E.Joining_Date, 4, 2) || '-' ||
+      SUBSTR(E.Joining_Date, 1, 2)
+  )
+  AND (
+      E.Employment_End_Date IS NULL
+      OR TRIM(E.Employment_End_Date) = ''
+      OR S.Transaction_Date <= (
+          SUBSTR(E.Employment_End_Date, 7, 4) || '-' ||
+          SUBSTR(E.Employment_End_Date, 4, 2) || '-' ||
+          SUBSTR(E.Employment_End_Date, 1, 2)
+      )
+  )
+GROUP BY S.Employee_ID;
+
+
+/*==============================================================================
+SECTION 11 — IDENTIFY POST-EXIT TRANSACTIONS
+The simulation intentionally retained eight post-exit transactions as data
+quality exceptions. 
+==============================================================================*/
+
+SELECT
+    S.Transaction_ID,
+    S.Employee_ID,
+    S.Transaction_Date,
+    S.Sales_Value,
+    E.Employment_End_Date
+FROM Sales_Transactions AS S
+JOIN Employee_Master AS E
+    ON S.Employee_ID = E.Employee_ID
+WHERE S.Transaction_Status = 'Completed'
+  AND E.Employment_End_Date IS NOT NULL
+  AND TRIM(E.Employment_End_Date) <> ''
+  AND S.Transaction_Date > (
+      SUBSTR(E.Employment_End_Date, 7, 4) || '-' ||
+      SUBSTR(E.Employment_End_Date, 4, 2) || '-' ||
+      SUBSTR(E.Employment_End_Date, 1, 2)
+  )
+ORDER BY S.Transaction_Date;
+
+
+/*==============================================================================
+SECTION 12 — CREATE THE FINAL INCENTIVE CALCULATION VIEW
+This is the central SQL calculation.
+
+The view starts from Target_Master so that all 300 employee-month target rows
+remain present, including employees with no eligible sales.
+
+Business rules applied:
+  1. Only Completed transactions are considered for eligible sales.
+  2. Transaction must fall within the incentive month.
+  3. Transaction must be on/after joining date and on/before exit date.
+  4. Achievement = eligible net sales / adjusted target.
+  5. Achievement below 80% -> no achievement incentive.
+  6. 80% to 100% -> linear ramp from ₹0 to ₹22,500.
+  7. Above 100% -> 1.5× accelerator on achievement above 100%.
+  8. Achievement incentive is capped separately at ₹30,000.
+  9. Qualifying product margin >= 15%.
+ 10. Profitability incentive = 0.5% of qualifying net sales, capped at ₹5,000.
+ 11. Final payout = capped achievement incentive + capped profitability
+     incentive. Maximum combined payout = ₹35,000.
+
+Important:
+- A LEFT JOIN from Target_Master preserves zero-sales employee-months.
+- Transaction filters are placed in the JOIN condition so that the LEFT JOIN
+  does not accidentally remove employees with no matching eligible sales.
+==============================================================================*/
+
+DROP VIEW IF EXISTS Incentive_Calculation;
+
+CREATE VIEW Incentive_Calculation AS
+WITH
+/* CTE 1: Convert employee joining and exit dates into ISO format. */
+Employee_Dates AS (
+    SELECT
+        Employee_ID,
+        CASE
+            WHEN Joining_Date IS NULL OR TRIM(Joining_Date) = ''
+            THEN NULL
+            ELSE
+                SUBSTR(Joining_Date, 7, 4) || '-' ||
+                SUBSTR(Joining_Date, 4, 2) || '-' ||
+                SUBSTR(Joining_Date, 1, 2)
+        END AS Standard_Joining_Date,
+        CASE
+            WHEN Employment_End_Date IS NULL
+                 OR TRIM(Employment_End_Date) = ''
+            THEN NULL
+            ELSE
+                SUBSTR(Employment_End_Date, 7, 4) || '-' ||
+                SUBSTR(Employment_End_Date, 4, 2) || '-' ||
+                SUBSTR(Employment_End_Date, 1, 2)
+        END AS Standard_Exit_Date
+    FROM Employee_Master
+),
+
+/* CTE 2: Aggregate eligible completed sales for every employee-month target.
+   Starting from Target_Master retains rows even when there are no eligible
+   transactions. */
+Sales_Achievement AS (
+    SELECT
+        T.Employee_ID,
+        T.Incentive_Month,
+        T.Adjusted_Sales_Target,
+
+        COALESCE(SUM(S.Sales_Value), 0) AS Eligible_Net_Sales
+
+    FROM Target_Master AS T
+
+    LEFT JOIN Employee_Dates AS E
+        ON T.Employee_ID = E.Employee_ID
+
+    LEFT JOIN Sales_Transactions AS S
+        ON T.Employee_ID = S.Employee_ID
+
+        -- Include transactions within the incentive month.
+        AND S.Transaction_Date >= T.Incentive_Month
+        AND S.Transaction_Date < DATE(T.Incentive_Month, '+1 month')
+
+        -- Only completed transactions are eligible.
+        AND S.Transaction_Status = 'Completed'
+
+        -- Exclude transactions before the employee joined.
+        AND S.Transaction_Date >= E.Standard_Joining_Date
+
+        -- Exclude transactions after the employee exited.
+        AND (
+            E.Standard_Exit_Date IS NULL
+            OR S.Transaction_Date <= E.Standard_Exit_Date
+        )
+
+    GROUP BY
+        T.Employee_ID,
+        T.Incentive_Month,
+        T.Adjusted_Sales_Target
+),
+
+/* CTE 3: Calculate achievement percentage and achievement eligibility.
+   NULLIF prevents division by zero when adjusted target is zero.
+   COALESCE converts the resulting NULL achievement to zero. */
+Eligibility AS (
+    SELECT
+        Employee_ID,
+        Incentive_Month,
+        Adjusted_Sales_Target,
+        Eligible_Net_Sales,
+
+        COALESCE(
+            Eligible_Net_Sales / NULLIF(Adjusted_Sales_Target, 0),
+            0
+        ) AS Achievement_Percentage,
+
+        CASE
+            WHEN Adjusted_Sales_Target = 0
+                THEN 'Not Eligible - Zero Target'
+            WHEN COALESCE(
+                Eligible_Net_Sales / NULLIF(Adjusted_Sales_Target, 0),
+                0
+            ) < 0.80
+                THEN 'Not Eligible - Below Threshold'
+            ELSE 'Eligible'
+        END AS Eligibility_Status
+
+    FROM Sales_Achievement
+),
+
+/* CTE 4: Calculate achievement incentive before applying its component cap. */
+Achievement_Payout AS (
+    SELECT
+        Employee_ID,
+        Incentive_Month,
+        Adjusted_Sales_Target,
+        Eligible_Net_Sales,
+        Achievement_Percentage,
+        Eligibility_Status,
+
+        CASE
+            WHEN Eligibility_Status <> 'Eligible'
+                THEN 0
+
+            -- Linear payout ramp from 80% achievement to 100%.
+            WHEN Achievement_Percentage <= 1.00
+                THEN 22500.0 *
+                     (Achievement_Percentage - 0.80) /
+                     (1.00 - 0.80)
+
+            -- Above 100%, apply the 1.5x accelerator only to the excess.
+            ELSE
+                22500.0 +
+                (
+                    (Achievement_Percentage - 1.00)
+                    * 22500.0
+                    * 1.5
+                )
+        END AS Achievement_Incentive_Before_Cap
+
+    FROM Eligibility
+),
+
+/* CTE 5: Calculate qualifying net sales.
+   A transaction qualifies only when:
+     - it is Completed;
+     - it falls within the employee's employment period;
+     - it falls within the incentive month; and
+     - its product contribution margin is at least 15%.
+   This component is independent of the 80% achievement threshold. */
+Profitability_Payout AS (
+    SELECT
+        T.Employee_ID,
+        T.Incentive_Month,
+
+        COALESCE(SUM(
+            CASE
+                WHEN P.Contribution_Margin >= 0.15
+                THEN S.Sales_Value
+                ELSE 0
+            END
+        ), 0) AS Qualifying_Net_Sales
+
+    FROM Target_Master AS T
+
+    LEFT JOIN Employee_Dates AS E
+        ON T.Employee_ID = E.Employee_ID
+
+    LEFT JOIN Sales_Transactions AS S
+        ON T.Employee_ID = S.Employee_ID
+        AND S.Transaction_Date >= T.Incentive_Month
+        AND S.Transaction_Date < DATE(T.Incentive_Month, '+1 month')
+        AND S.Transaction_Status = 'Completed'
+        AND S.Transaction_Date >= E.Standard_Joining_Date
+        AND (
+            E.Standard_Exit_Date IS NULL
+            OR S.Transaction_Date <= E.Standard_Exit_Date
+        )
+
+    LEFT JOIN Product_Master AS P
+        ON S.Product_ID = P.Product_ID
+
+    GROUP BY
+        T.Employee_ID,
+        T.Incentive_Month
+),
+
+/* CTE 6: Combine both independently calculated incentive components and
+   apply each component's separate cap. */
+Final_Payout AS (
+    SELECT
+        A.Employee_ID,
+        A.Incentive_Month,
+        A.Adjusted_Sales_Target,
+        A.Eligible_Net_Sales,
+        A.Achievement_Percentage,
+        A.Eligibility_Status,
+        A.Achievement_Incentive_Before_Cap,
+
+        MIN(
+            MAX(A.Achievement_Incentive_Before_Cap, 0),
+            30000.0
+        ) AS Achievement_Incentive_After_Cap,
+
+        P.Qualifying_Net_Sales,
+
+        MIN(
+            P.Qualifying_Net_Sales * 0.005,
+            5000.0
+        ) AS Profitability_Incentive
+
+    FROM Achievement_Payout AS A
+
+    LEFT JOIN Profitability_Payout AS P
+        ON A.Employee_ID = P.Employee_ID
+        AND A.Incentive_Month = P.Incentive_Month
+)
+
+-- Final output: one row per employee per incentive month.
+SELECT
+    Employee_ID,
+    Incentive_Month,
+    Adjusted_Sales_Target,
+    Eligible_Net_Sales,
+    Achievement_Percentage,
+    Eligibility_Status,
+    Achievement_Incentive_Before_Cap,
+    Achievement_Incentive_After_Cap,
+    Qualifying_Net_Sales,
+    Profitability_Incentive,
+
+    -- Add the two separately capped components.
+    Achievement_Incentive_After_Cap
+        + Profitability_Incentive AS Total_Incentive
+
+FROM Final_Payout;
+
+
+/*==============================================================================
+SECTION 13 — VIEW THE FINAL EMPLOYEE-MONTH INCENTIVE OUTPUT
+==============================================================================*/
+
+SELECT *
+FROM Incentive_Calculation
+ORDER BY Incentive_Month, Employee_ID;
+
+
+/*==============================================================================
+SECTION 14 — FINAL INCENTIVE ELIGIBILITY COUNTS
+  Eligible                       21
+  Not Eligible - Below Threshold 259
+  Not Eligible - Zero Target      20
+  Total                          300
+==============================================================================*/
+
+SELECT
+    Eligibility_Status,
+    COUNT(*) AS Employee_Month_Count
+FROM Incentive_Calculation
+GROUP BY Eligibility_Status
+ORDER BY Eligibility_Status;
+
+
+/*==============================================================================
+SECTION 15 — FINAL PAYOUT VALIDATION AND RECONCILIATION
+  Total achievement incentive       = ₹567,918.75
+  Total profitability incentive     = ₹96,725.00
+  Total incentive payout            = ₹664,643.75
+  Maximum individual employee-month = ₹35,000
+  Payouts above ₹35,000             = 0
+==============================================================================*/
+
+-- 15A. Sum of achievement and profitability incentive components and final payout.
+SELECT
+    SUM(Achievement_Incentive_After_Cap) AS Total_Achievement_Incentive,
+    SUM(Profitability_Incentive) AS Total_Profitability_Incentive,
+    SUM(Total_Incentive) AS Total_Incentive_Payout
+FROM Incentive_Calculation;
+
+-- 15B. Check the maximum employee-month payout.
+SELECT
+    MAX(Total_Incentive) AS Maximum_Employee_Month_Payout
+FROM Incentive_Calculation;
+
+-- 15C. Check whether any payout exceeds the maximum combined cap.
+SELECT
+    COUNT(*) AS Payouts_Above_Combined_Cap
+FROM Incentive_Calculation
+WHERE Total_Incentive > 35000;
+
+-- 15D. Check component-to-total reconciliation.
+SELECT
+    SUM(Achievement_Incentive_After_Cap)
+      + SUM(Profitability_Incentive)
+      - SUM(Total_Incentive) AS Reconciliation_Difference
+FROM Incentive_Calculation;
+
+-- 15E. Verify total qualifying sales against the qualifying source transactions.
+-- Source criteria: Completed, within employment, product margin >= 15%.
+SELECT
+    SUM(Qualifying_Net_Sales) AS Qualifying_Sales_From_View
+FROM Incentive_Calculation;
+
+-- 15F. Inspect the highest payout employee-month records.
+SELECT
+    Employee_ID,
+    Incentive_Month,
+    Achievement_Percentage,
+    Achievement_Incentive_After_Cap,
+    Qualifying_Net_Sales,
+    Profitability_Incentive,
+    Total_Incentive
+FROM Incentive_Calculation
+ORDER BY Total_Incentive DESC
+LIMIT 20;
+
+
+/*==============================================================================
+SECTION 16 — CROSS-CHECK TOTAL ELIGIBLE SALES
+==============================================================================*/
+
+WITH Employee_Dates AS (
+    SELECT
+        Employee_ID,
+        SUBSTR(Joining_Date, 7, 4) || '-' ||
+        SUBSTR(Joining_Date, 4, 2) || '-' ||
+        SUBSTR(Joining_Date, 1, 2) AS Standard_Joining_Date,
+        CASE
+            WHEN Employment_End_Date IS NULL
+                 OR TRIM(Employment_End_Date) = ''
+            THEN NULL
+            ELSE
+                SUBSTR(Employment_End_Date, 7, 4) || '-' ||
+                SUBSTR(Employment_End_Date, 4, 2) || '-' ||
+                SUBSTR(Employment_End_Date, 1, 2)
+        END AS Standard_Exit_Date
+    FROM Employee_Master
+)
+SELECT
+    SUM(S.Sales_Value) AS Total_Eligible_Net_Sales
+FROM Sales_Transactions AS S
+JOIN Employee_Dates AS E
+    ON S.Employee_ID = E.Employee_ID
+WHERE S.Transaction_Status = 'Completed'
+  AND S.Transaction_Date >= E.Standard_Joining_Date
+  AND (
+      E.Standard_Exit_Date IS NULL
+      OR S.Transaction_Date <= E.Standard_Exit_Date
+  );
+
+
+/*==============================================================================
+SECTION 17 — FINAL PROJECT TABLE AND VIEW INVENTORY
+==============================================================================*/
+
+SELECT
+    type AS Object_Type,
+    name AS Object_Name
+FROM sqlite_master
+WHERE type IN ('table', 'view')
+ORDER BY
+    CASE type WHEN 'table' THEN 1 ELSE 2 END,
+    name;
+
+
+/*==============================================================================
