@@ -41,10 +41,10 @@ The project covers the end-to-end incentive calculation workflow, combining busi
 
 | File | Description |
 |---|---|
-| `ICM_Project.xlsx` | Excel-based incentive calculation model and validation checks |
-| `ICM_Final_SQL_Queries_Commented.sql` | Complete SQL script documenting database creation, data imports, transformations, calculations, and validations |
-| `Business Requirements and Incentive Plan Design Rulebook.pdf` | Business assumptions, incentive plan design, payout rules, and calculation methodology |
-| `User_Stories_Acceptance_Criteria_Product_Workflows.pdf` | User stories, acceptance criteria, process workflows, and test scenarios |
+| Sales Incentive Compensation Management.xlsx | Excel-based incentive calculation model and validation checks |
+| SQL Queries Used.txt | Complete SQL script documenting database creation, data imports, transformations, calculations, and validations |
+| Business Requirements Rulebook.pdf | Business assumptions, incentive plan design, payout rules, and calculation methodology |
+| User Stories and Product_Workflows.pdf | User stories, acceptance criteria, process workflows, and test scenarios |
 
 ## Disclaimer
 
