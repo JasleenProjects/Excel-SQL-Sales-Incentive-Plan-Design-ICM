@@ -45,7 +45,7 @@ The project covers the end-to-end incentive calculation workflow, combining busi
 | Sales Incentive Compensation Management.xlsx | Excel-based incentive calculation model and validation checks |
 | SQL Queries Used.txt | Complete SQL script documenting database creation, data imports, transformations, calculations, and validations |
 | Product Requirements Document.pdf | Product requirements covering business objectives, functional requirements, business rules, data requirements, validation controls, exception handling, stakeholders, and proposed success metrics |
-| User Stories and Product_Workflows.pdf | User stories, acceptance criteria, process workflows, and test scenarios |
+| User Stories and Product Workflow.pdf | User stories, acceptance criteria, process workflows, and test scenarios |
 
 ## Disclaimer
 
